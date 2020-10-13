@@ -1,7 +1,8 @@
 import * as socketio from 'socket.io';
 
-import server from "./server";
-import auth from "./firebase";
+import * as http from 'http';
+
+import * as firebase from 'firebase-admin';
 
 import { isValidCourseId } from "./courses";
 import { isObject } from "./typeUtils";
@@ -33,148 +34,150 @@ declare module 'socket.io' {
     }
 }
 
+export function initializeSocketIO(server: http.Server) {
+    const io = socketio(server, { origins: '*:*' });
 
-const io = socketio(server);
+    class SocketHandler {
+        private socket: socketio.Socket;
 
-class SocketHandler {
-    private socket: socketio.Socket;
-
-    constructor(socket: socketio.Socket) {
-        this.socket = socket;
-    }
-
-    badInput(): void {
-        const { socket } = this;
-
-        socket.emit(ClientEvent.BadInput);
-    }
-
-    study(courseId: string) {
-
-    }
-
-    joinRoom(courseId: string) {
-        const { socket } = this;
-
-        if (isValidCourseId(courseId)) {
-            socket.join(courseId);
-            socket.emit(ClientEvent.RoomJoined, courseId);
-        } else {
-            socket.emit(ClientEvent.NoRoom, courseId);
-        }
-    }
-
-    leaveRoom(courseId: string) {
-        const { socket } = this;
-
-        socket.leave(courseId);
-    }
-
-    chat(message: ReceivedChatMessage) {
-        const { socket } = this;
-
-        if (`${message.courseId}` in socket.rooms) {
-            const {
-                courseId,
-                sent,
-                name,
-                text,
-            } = message;
-
-            io.to(`${message.courseId}`).emit(ClientEvent.Chat, {
-                name,
-                text,
-                sent,
-                courseId,
-                acknowledged: Date.now()
-            });
-        }
-    }
-}
-
-function setupSocket(socket: socketio.Socket) {
-    const handler = new SocketHandler(socket);
-
-    socket.on(ServerEvent.JoinRoom, (courseId) => {
-        if (typeof courseId === 'string') {
-            return handler.joinRoom(courseId);
+        constructor(socket: socketio.Socket) {
+            this.socket = socket;
         }
 
-        return handler.badInput();
-    });
+        badInput(): void {
+            const { socket } = this;
 
-    socket.on(ServerEvent.LeaveRoom, (courseId) => {
-        if (typeof courseId === 'string') {
-            return handler.leaveRoom(courseId);
+            socket.emit(ClientEvent.BadInput);
         }
 
-        return handler.badInput();
-    });
+        study(courseId: string) {
 
-    socket.on(ServerEvent.Chat, (message) => {
-        if (isChatMessage(message)) {
-            return handler.chat(message);
         }
 
-        return handler.badInput();
-    });
+        joinRoom(courseId: string) {
+            const { socket } = this;
 
-}
-
-io.sockets
-    .on('connection', socket => {
-
-        setTimeout(() => {
-            if (!socket.authenticated) {
-                console.log('disconnected client!');
-                socket.disconnect();
+            if (isValidCourseId(courseId)) {
+                socket.join(courseId);
+                socket.emit(ClientEvent.RoomJoined, courseId);
+            } else {
+                socket.emit(ClientEvent.NoRoom, courseId);
             }
-        }, 15 * 1000 /* ms */);
+        }
 
-        socket.on(ServerEvent.Authenticate, (options) => {
-            if (socket.disconnected) return;
+        leaveRoom(courseId: string) {
+            const { socket } = this;
 
-            if (!isObject(options)) {
-                return socket.disconnect();
+            socket.leave(courseId);
+        }
+
+        chat(message: ReceivedChatMessage) {
+            const { socket } = this;
+
+            if (`${message.courseId}` in socket.rooms) {
+                const {
+                    courseId,
+                    sent,
+                    name,
+                    text,
+                } = message;
+
+                io.to(`${message.courseId}`).emit(ClientEvent.Chat, {
+                    name,
+                    text,
+                    sent,
+                    courseId,
+                    acknowledged: Date.now()
+                });
+            }
+        }
+    }
+
+    function setupSocket(socket: socketio.Socket) {
+        const handler = new SocketHandler(socket);
+        console.log('setup?');
+        socket.on(ServerEvent.JoinRoom, (courseId) => {
+            if (typeof courseId === 'string') {
+                console.log(courseId);
+                return handler.joinRoom(courseId);
             }
 
-            const { JWT = null } = options;
+            return handler.badInput();
+        });
 
-            if (typeof JWT !== 'string') {
-                return socket.disconnect();
+        socket.on(ServerEvent.LeaveRoom, (courseId) => {
+            if (typeof courseId === 'string') {
+                return handler.leaveRoom(courseId);
             }
 
-            const jwt = JWT;
+            return handler.badInput();
+        });
 
-            try {
-                auth.verifyIdToken(jwt, true).then((claims) => {
-                    socket.info = {};
-                    socket.info.email = claims.email;
+        socket.on(ServerEvent.Chat, (message) => {
+            if (isChatMessage(message)) {
+                return handler.chat(message);
+            }
 
-                    // TODO: Add 'authenticating'
-                    socket.authenticated = true;
+            return handler.badInput();
+        });
 
-                    return auth.getUser(claims.uid);
-                }).then(user => {
-                    socket.info.email = user.email;
-                    socket.info.displayName = user.displayName;
+    }
 
-                    socket.authenticated = true;
+    io.sockets
+        .on('connection', socket => {
 
-                    socket.emit(ClientEvent.Authenticated);
+            setTimeout(() => {
+                if (!socket.authenticated) {
+                    console.log('disconnected client!');
+                    socket.disconnect();
+                }
+            }, 15 * 1000 /* ms */);
 
-                    setupSocket(socket);
-                }).catch(err => {
+            socket.on(ServerEvent.Authenticate, (options) => {
+                if (socket.disconnected) return;
+
+                if (!isObject(options)) {
+                    return socket.disconnect();
+                }
+
+                const { JWT = null } = options;
+
+                if (typeof JWT !== 'string') {
+                    return socket.disconnect();
+                }
+
+                const jwt = JWT;
+
+                try {
+                    firebase.auth().verifyIdToken(jwt, true).then((claims) => {
+                        socket.info = {};
+                        socket.info.email = claims.email;
+
+                        // TODO: Add 'authenticating'
+                        socket.authenticated = true;
+
+                        return firebase.auth().getUser(claims.uid);
+                    }).then(user => {
+                        socket.info.email = user.email;
+                        socket.info.displayName = user.displayName;
+
+                        socket.authenticated = true;
+
+                        socket.emit(ClientEvent.Authenticated);
+
+                        setupSocket(socket);
+                    }).catch(err => {
+                        console.error(err);
+
+                        // TODO: Prevent connections on unauthorized users.
+                        socket.disconnect();
+                    });
+                } catch (err) {
                     console.error(err);
 
                     // TODO: Prevent connections on unauthorized users.
                     socket.disconnect();
-                });
-            } catch (err) {
-                console.error(err);
-
-                // TODO: Prevent connections on unauthorized users.
-                socket.disconnect();
-            }
+                }
+            });
         });
-    });
+}
